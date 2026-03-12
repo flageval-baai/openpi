@@ -90,6 +90,9 @@ class DataConfig:
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
 
+    # If set, only use these episode indices. Used for train/val splitting.
+    episodes: list[int] | None = None
+
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
     # Action space for DROID dataset.
@@ -461,7 +464,7 @@ class LeRobotDROIDDataConfig(DataConfigFactory):
             model_transforms=model_transforms,
         )
 
-
+    
 @dataclasses.dataclass(frozen=True)
 class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
@@ -494,6 +497,11 @@ class TrainConfig:
 
     # Determines the data to be trained on.
     data: DataConfigFactory = dataclasses.field(default_factory=FakeDataConfig)
+
+    # Validation data config factory. If set, enables validation during training.
+    val_data: DataConfigFactory | None = None
+    # How often (in steps) to compute validation loss.
+    val_interval: int = 1000
 
     # Base directory for config assets (e.g., norm stats).
     assets_base_dir: str = "./assets"
@@ -554,6 +562,16 @@ class TrainConfig:
     def __post_init__(self) -> None:
         if self.resume and self.overwrite:
             raise ValueError("Cannot resume and overwrite at the same time.")
+
+
+def _get_agx_configs() -> list[TrainConfig]:
+    from openpi.training.agx_config import get_agx_configs
+    return get_agx_configs()
+
+
+def _get_franka_configs() -> list[TrainConfig]:
+    from openpi.training.franka_config import get_franka_configs
+    return get_franka_configs()
 
 
 # Use `get_config` if you need to get a config by name in your code.
@@ -968,7 +986,12 @@ _CONFIGS = [
     # RoboArena & PolaRiS configs.
     *roboarena_config.get_roboarena_configs(),
     *polaris_config.get_polaris_configs(),
+    # AGX configs (pi0 + pi05) — see agx_config.py.
+    *_get_agx_configs(),
+    # Franka configs (pi05) — see franka_config.py.
+    *_get_franka_configs(),
 ]
+
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
     raise ValueError("Config names must be unique.")

@@ -191,6 +191,21 @@ def train_step(
     return new_state, info
 
 
+@at.typecheck
+def val_step(
+    config: _config.TrainConfig,
+    rng: at.KeyArrayLike,
+    state: training_utils.TrainState,
+    batch: tuple[_model.Observation, _model.Actions],
+) -> dict[str, at.Array]:
+    model = nnx.merge(state.model_def, state.ema_params if state.ema_params is not None else state.params)
+    model.eval()
+
+    observation, actions = batch
+    chunked_loss = model.compute_loss(rng, observation, actions, train=False)
+    return {"val_loss": jnp.mean(chunked_loss)}
+
+
 def main(config: _config.TrainConfig):
     init_logging()
     logging.info(f"Running on: {platform.node()}")
@@ -226,6 +241,13 @@ def main(config: _config.TrainConfig):
     batch = next(data_iter)
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
+    # Set up validation data loader if val_data is configured.
+    val_data_iter = None
+    if config.val_data is not None:
+        val_loader = _data_loader.create_val_data_loader(config, sharding=data_sharding)
+        val_data_iter = iter(val_loader)
+        logging.info("Initialized validation data loader.")
+
     # Log images from first batch to sanity check.
     images_to_log = [
         wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
@@ -247,6 +269,13 @@ def main(config: _config.TrainConfig):
         donate_argnums=(1,),
     )
 
+    if val_data_iter is not None:
+        pval_step = jax.jit(
+            functools.partial(val_step, config),
+            in_shardings=(replicated_sharding, train_state_sharding, data_sharding),
+            out_shardings=replicated_sharding,
+        )
+
     start_step = int(train_state.step)
     pbar = tqdm.tqdm(
         range(start_step, config.num_train_steps),
@@ -267,6 +296,17 @@ def main(config: _config.TrainConfig):
             pbar.write(f"Step {step}: {info_str}")
             wandb.log(reduced_info, step=step)
             infos = []
+
+        # Periodic validation evaluation.
+        if val_data_iter is not None and step % config.val_interval == 0 and step > 0:
+            val_batch = next(val_data_iter)
+            with sharding.set_mesh(mesh):
+                val_info = pval_step(train_rng, train_state, val_batch)
+            val_info = jax.device_get(val_info)
+            val_info_str = ", ".join(f"{k}={v:.4f}" for k, v in val_info.items())
+            pbar.write(f"Step {step} [val]: {val_info_str}")
+            wandb.log(val_info, step=step)
+
         batch = next(data_iter)
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:

@@ -88,10 +88,15 @@ def _merge_params(loaded_params: at.Params, params: at.Params, *, missing_regex:
     flat_loaded = flax.traverse_util.flatten_dict(loaded_params, sep="/")
 
     # First, take all weights that are a subset of the reference weights.
+    # Skip weights with shape mismatches (e.g. action_dim changed) — keep the model's init instead.
     result = {}
     for k, v in flat_loaded.items():
         if k in flat_ref:
-            result[k] = v.astype(flat_ref[k].dtype) if v.dtype != flat_ref[k].dtype else v
+            if v.shape != flat_ref[k].shape:
+                logger.warning(f"Shape mismatch for {k}: checkpoint={v.shape}, model={flat_ref[k].shape}. Using model init.")
+                result[k] = flat_ref[k]
+            else:
+                result[k] = v.astype(flat_ref[k].dtype) if v.dtype != flat_ref[k].dtype else v
 
     flat_loaded.clear()
 

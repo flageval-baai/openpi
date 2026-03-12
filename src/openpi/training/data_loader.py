@@ -7,7 +7,7 @@ from typing import Literal, Protocol, SupportsIndex, TypeVar
 
 import jax
 import jax.numpy as jnp
-import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
+import lerobot.datasets.lerobot_dataset as lerobot_dataset
 import numpy as np
 import torch
 
@@ -140,10 +140,20 @@ def create_torch_dataset(
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
+        episodes=data_config.episodes,
         delta_timestamps={
             key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
         },
     )
+
+    # When episodes are filtered, LeRobotDataset re-indexes episode_data_index to 0..N-1
+    # but the episode_index column in hf_dataset retains original values (e.g. 80, 81, ...),
+    # causing an IndexError in _get_query_indices. Remap to match.
+    if data_config.episodes is not None:
+        ep_id_map = {orig: new for new, orig in enumerate(sorted(data_config.episodes))}
+        dataset.hf_dataset = dataset.hf_dataset.map(
+            lambda row: {"episode_index": ep_id_map[int(row["episode_index"])]},
+        )
 
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
@@ -260,6 +270,40 @@ def create_data_loader(
         batch_size=config.batch_size,
         sharding=sharding,
         shuffle=shuffle,
+        num_batches=num_batches,
+        num_workers=config.num_workers,
+        seed=config.seed,
+        skip_norm_stats=skip_norm_stats,
+        framework=framework,
+    )
+
+
+def create_val_data_loader(
+    config: _config.TrainConfig,
+    *,
+    sharding: jax.sharding.Sharding | None = None,
+    num_batches: int | None = None,
+    skip_norm_stats: bool = False,
+    framework: Literal["jax", "pytorch"] = "jax",
+) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
+    """Create a validation data loader from the val_data config.
+
+    This is a convenience wrapper around create_data_loader that uses config.val_data
+    and disables shuffling.
+    """
+    if config.val_data is None:
+        raise ValueError("val_data is not set on the config.")
+
+    val_data_config = config.val_data.create(config.assets_dirs, config.model)
+    logging.info(f"val_data_config: {val_data_config}")
+
+    return create_torch_data_loader(
+        val_data_config,
+        model_config=config.model,
+        action_horizon=config.model.action_horizon,
+        batch_size=config.batch_size,
+        sharding=sharding,
+        shuffle=False,
         num_batches=num_batches,
         num_workers=config.num_workers,
         seed=config.seed,
